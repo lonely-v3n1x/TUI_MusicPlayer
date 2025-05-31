@@ -15,7 +15,7 @@
 #include "ftxui/component/event.hpp"
 
 //include miniaudio.h
-#include "../include/miniaudio.h"
+#include "../include/miniaudio.c"
 
 
 namespace fs =  std::filesystem;
@@ -77,7 +77,7 @@ int main(){
 	// deviceconfig.puserdata = &decoder;
 	
 	
-	std::string path="/home/lonely_shepard/Downloads/Music";
+	std::string path="/home/lonely_shepard/Downloads/Music/";
 	
 	std::vector<std::string> audio_files_list = get_music_list(path);
 	int file_selected=0;
@@ -93,7 +93,7 @@ int main(){
 	auto screen = ScreenInteractive::Fullscreen();
 
 	auto menu_music_list = Menu(&audio_files_list,&file_selected, MenuOption::VerticalAnimated());
-	menu_music_list= CatchEvent([&](Event event){
+	menu_music_list= CatchEvent(menu_music_list, [&](Event event){
 		if(event == Event::Return){
 			//load the file, check playing state and play the song
 			std::string full_music_path = path+audio_files_list[file_selected];
@@ -105,7 +105,7 @@ int main(){
 				screen.ExitLoopClosure()();
 				std::cout<<"Failed to load music file"<<path+audio_files_list[file_selected]<<std::endl;
 				
-				return -2;
+				// return -2;
 				
 			}
 
@@ -114,22 +114,21 @@ int main(){
 			deviceConfig.playback.channels = decoder.outputChannels;
 			deviceConfig.sampleRate = decoder.outputSampleRate;
 			deviceConfig.dataCallback = data_callback; 
-			deviceConfig.puserdata = &decoder;
-
+			deviceConfig.pUserData = &decoder;
 			if(ma_device_init(NULL, &deviceConfig, &device)!= MA_SUCCESS){
 				screen.ExitLoopClosure()();
 				std::cout<<"Failed ot open playback device"<<std::endl;
 				ma_decoder_uninit(&decoder);
-				return -3;
+				// return -3;
 			}
 
-			if(ma_device_start(&device)!=MA_SUCCES){
+			if(ma_device_start(&device)!=MA_SUCCESS){
 				ma_device_uninit(&device);
 				ma_decoder_uninit(&decoder);
 				screen.ExitLoopClosure()();
 				
 				std::cout<<"Failed to start playback device"<<std::endl;
-				return -4;
+				// return -4;
 				
 			}
 
@@ -147,7 +146,7 @@ int main(){
 	auto renderer = Renderer(container, [&]{
 		return window(text("TUIMUSICPLAYER"), hbox({
 			menu_music_list->Render() | size(WIDTH, GREATER_THAN, 20)| color(Color::Red),
-			seperatedStyle(DASHED),
+			separatorStyled(DASHED),
 			vbox({
 				
 			}),
