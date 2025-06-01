@@ -21,6 +21,9 @@
 namespace fs =  std::filesystem;
 using namespace ftxui;
 
+
+ma_bool32 playing=MA_TRUE; //a global variable for checkin the playing state
+
 std::vector<std::string> get_music_list(const std::string& directory){
 	std::vector<std::string> audio_files;
 	// std::vector<std::string> supported_extension = {".mp3", ".wav", ".flac"}; //a future problem to worry about
@@ -37,7 +40,6 @@ std::vector<std::string> get_music_list(const std::string& directory){
 }
 
 
-ma_bool32 playing=MA_TRUE;
 
 void data_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma_uint32 frameCount){
 
@@ -68,6 +70,8 @@ int main(){
 	ma_device device;
 	ma_device_config deviceConfig;
 
+	// ma_bool32 device_started= MA_FALSE; //set device_started to true so the we can free memory if fslse we dont 
+	
 	//device configuration
 	// deviceConfig = ma_device_config_init(ma_device_type_playback);
 	// deviceconfig.playback.format = decoder.outputformat;
@@ -95,6 +99,15 @@ int main(){
 	auto menu_music_list = Menu(&audio_files_list,&file_selected, MenuOption::VerticalAnimated());
 	menu_music_list= CatchEvent(menu_music_list, [&](Event event){
 		if(event == Event::Return){
+			
+			//check if playing is false, change to true
+			
+			if(ma_device_is_started(&device) ){
+				ma_device_stop(&device);
+				if(!playing){ playing = !playing;}
+				
+			}
+			
 			//load the file, check playing state and play the song
 			std::string full_music_path = path+audio_files_list[file_selected];
 			results = ma_decoder_init_file(full_music_path.c_str(),NULL, &decoder);
@@ -109,6 +122,8 @@ int main(){
 				
 			}
 
+			// device_started=MA_TRUE; 
+			
 			deviceConfig = ma_device_config_init(ma_device_type_playback);
 			deviceConfig.playback.format = decoder.outputFormat;
 			deviceConfig.playback.channels = decoder.outputChannels;
@@ -138,38 +153,74 @@ int main(){
 		return false;
 	});
 
+	
+	auto current_music_state = []{ if(playing){return "PLAYING...";} else { return "PAUSED...";}};
+	
+	auto display_music_state = Renderer( [&]{
+	      return hbox({
+		text("MUSIC IS: " + std::string(current_music_state()) ) | color(Color::Green),
+		}) | size(HEIGHT, EQUAL, 1) ;
+	});
+
+
 	auto container = Container::Horizontal({
 		menu_music_list,
 	});
 
-
+	auto right_container=Container::Vertical({
+		
+		//visualizer here,
+		//separator
+		//control
+		//slider for music
+		
+	});
+	
 	auto renderer = Renderer(container, [&]{
 		return window(text("TUIMUSICPLAYER"), hbox({
 			menu_music_list->Render() | size(WIDTH, GREATER_THAN, 20)| color(Color::Red),
 			separatorStyled(DASHED),
 			vbox({
-				
-			}),
+				display_music_state->Render()  | bold,
+				separator(),
+				filler(),
+			}) | flex,
+			
 		}));
 	});
 
-	// renderer = CatchEvent(renderer, [&](Event event){
-	//
-	// 	//set q to quit, space_bar to pause 
-	// 	if(){
-	//
-	// 		return true;
-	// 	}
-	// 	else{
-	// 		return true;
-	// 	}
-	//
-	// 	return false;
-	// });
+	renderer = CatchEvent(renderer, [&](Event event){
+
+		//set q to quit, space_bar to toggle to between pause and play 
+		if(event == Event::Character('q')){
+			
+			if(ma_device_is_started(&device)){
+				// ma_device_stop(&device);
+				ma_device_uninit(&device);
+				ma_decoder_uninit(&decoder);
+			}
+			
+			screen.ExitLoopClosure()();
+		
+			return true;
+		}
+		else if(event == Event::Character(' ')){
+			playing=!playing;
+			
+			return true;
+		}
+
+		return false;
+	});
 
 
 	screen.Loop(renderer);
 
 	
+	// //free the memory 
+	// ma_device_uninit(&device);
+	// ma_decoder_uninit(&decoder);
+	// double free
+
 	return EXIT_SUCCESS;
 }
