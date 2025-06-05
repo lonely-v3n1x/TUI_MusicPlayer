@@ -1,0 +1,9 @@
+[] --- todo 
+[*] --- done 
+
+
+[] == add mouse navigation and left click in the menu list component( not global ) to start audio
+[] -- play / pause, next and previous button 
+[] -- notify user about keys needed for movement i.e ArrowUp and ArrowDown/ j/k for up and down, space to pause and resume audio, Enter to start music 
+[] -- move slider for seeking
+[] -- auto move to next music when the current audio is done playing

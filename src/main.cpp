@@ -37,35 +37,36 @@ typedef struct {
   std::vector<double> bars_left;
   // double pcm_double[4096] ; //this variable holds the convert data from
   // pOutput to the format cava_execute can process
-  ma_uint64* framesRead;
+  ma_uint64 *framesRead;
   std::mutex mutex;
 } visualizationData;
 
-
-//GLOBALS
-// cava_plan* plan = cava_init(NUMBER_OF_BARS, SAMPLE_RATE, CHANNELS, AUTOSENS,
-// NOISE_REDUCTION, LOW_CUT_OFF, HIGH_CUT_OFF);
-cava_plan* plan = nullptr;
+// GLOBALS
+//  cava_plan* plan = cava_init(NUMBER_OF_BARS, SAMPLE_RATE, CHANNELS, AUTOSENS,
+//  NOISE_REDUCTION, LOW_CUT_OFF, HIGH_CUT_OFF);
+cava_plan *plan = nullptr;
 visualizationData viz_data;
-ma_bool32 playing = MA_TRUE;  // a global variable for checkin the playing state
+ma_bool32 playing = MA_TRUE; // a global variable for checkin the playing state
 std::string simple_test;
 int bar_spacing = 1; // Configurable spacing between bars
 
-// Add global screen pointer for posting updates
+//
+ma_uint64 current_audio_position;
+int audio_progress;
+ma_uint64 audio_length;
 
-ScreenInteractive* global_screen = nullptr;
+// Add global screen pointer for posting updates
+ScreenInteractive *global_screen = nullptr;
 
 // Add timing control for refresh rate
-
 auto last_update = std::chrono::steady_clock::now();
+const auto refresh_interval = std::chrono::milliseconds(16); // ~60 FPS
 
-const auto refresh_interval = std::chrono::milliseconds(16);  // ~60 FPS
-
-std::vector<std::string> get_music_list(const std::string& directory) {
+std::vector<std::string> get_music_list(const std::string &directory) {
   std::vector<std::string> audio_files;
   // std::vector<std::string> supported_extension = {".mp3", ".wav", ".flac"};
   // //a future problem to worry about
-  for (const auto& entry : fs::directory_iterator(directory)) {
+  for (const auto &entry : fs::directory_iterator(directory)) {
     std::string file_extension = entry.path().extension();
     if (file_extension == ".mp3" || file_extension == ".wav" ||
         file_extension == ".flac") {
@@ -81,39 +82,51 @@ std::vector<std::string> get_music_list(const std::string& directory) {
 // Function to get gradient color based on frequency and amplitude
 Color get_gradient_color(double value, int bar_index, int total_bars) {
   // Create frequency-based color mapping (low to high: green -> yellow -> red)
-  float freq_ratio = static_cast<float>(bar_index) / static_cast<float>(total_bars - 1);
+  float freq_ratio =
+      static_cast<float>(bar_index) / static_cast<float>(total_bars - 1);
 
   // Amplitude-based intensity
   float intensity = static_cast<float>(value);
 
   if (freq_ratio < 0.33f) {
     // Low frequencies: Green to Yellow-Green
-    if (intensity > 0.7f) return Color::GreenLight;
-    else if (intensity > 0.4f) return Color::Green;
-    else if (intensity > 0.2f) return Color::GreenLight;
-    else return Color::RGB(0, 64, 0); // Dark green
-  }
-  else if (freq_ratio < 0.66f) {
+    if (intensity > 0.7f)
+      return Color::GreenLight;
+    else if (intensity > 0.4f)
+      return Color::Green;
+    else if (intensity > 0.2f)
+      return Color::GreenLight;
+    else
+      return Color::RGB(0, 64, 0); // Dark green
+  } else if (freq_ratio < 0.66f) {
     // Mid frequencies: Yellow to Orange
-    if (intensity > 0.7f) return Color::Yellow;
-    else if (intensity > 0.4f) return Color::RGB(255, 165, 0); // Orange
-    else if (intensity > 0.2f) return Color::RGB(255, 140, 0); // Dark orange
-    else return Color::RGB(128, 64, 0); // Dark yellow
-  }
-  else {
+    if (intensity > 0.7f)
+      return Color::Yellow;
+    else if (intensity > 0.4f)
+      return Color::RGB(255, 165, 0); // Orange
+    else if (intensity > 0.2f)
+      return Color::RGB(255, 140, 0); // Dark orange
+    else
+      return Color::RGB(128, 64, 0); // Dark yellow
+  } else {
     // High frequencies: Orange to Red
-    if (intensity > 0.7f) return Color::RedLight;
-    else if (intensity > 0.4f) return Color::Red;
-    else if (intensity > 0.2f) return Color::RGB(139, 0, 0); // Dark red
-    else return Color::RGB(64, 0, 0); // Very dark red
+    if (intensity > 0.7f)
+      return Color::RedLight;
+    else if (intensity > 0.4f)
+      return Color::Red;
+    else if (intensity > 0.2f)
+      return Color::RGB(139, 0, 0); // Dark red
+    else
+      return Color::RGB(64, 0, 0); // Very dark red
   }
 }
 
-void data_callback(ma_device* pDevice, void* pOutput, const void* pInput,
+void data_callback(ma_device *pDevice, void *pOutput, const void *pInput,
                    ma_uint32 frameCount) {
-  (void*)pInput;  // we wouldn't be receiving any input
+  (void *)pInput; // we wouldn't be receiving any input
 
-  ma_decoder* pDecoder = (ma_decoder*)pDevice->pUserData;
+  ma_decoder *pDecoder = (ma_decoder *)pDevice->pUserData;
+  // ma_uint64 current_position_in_pcm;
 
   if (pDecoder == NULL) {
     printf("Failed to initialize the Decoder\n");
@@ -126,7 +139,16 @@ void data_callback(ma_device* pDevice, void* pOutput, const void* pInput,
   } else {
     ma_decoder_read_pcm_frames(pDecoder, pOutput, frameCount, NULL);
 
-    const float* pcm_float32 = (const float*)pOutput;
+    ma_decoder_get_cursor_in_pcm_frames(pDecoder, &current_audio_position);
+
+    /*audio_progress = static_cast<int>(((current_audio_position / SAMPLE_RATE)
+       / (audio_length / SAMPLE_RATE)) * 100.0);*/
+    audio_progress =
+        static_cast<int>((static_cast<double>(current_audio_position) /
+                          static_cast<double>(audio_length)) *
+                         100.0);
+
+    const float *pcm_float32 = (const float *)pOutput;
     double pcm_double[4096];
     double cava_out[NUMBER_OF_BARS * CHANNELS] = {0};
 
@@ -143,10 +165,13 @@ void data_callback(ma_device* pDevice, void* pOutput, const void* pInput,
 
     // ma_decoder_get_data_format(pDecoder,pDevice->playback.format,pDevice->playback.channels,
     // pDevice->playback.sampleRate , NULL , NULL);
+
+    // ma_decoder_get_cursor_in_pcm_frames(pDecoder,
+    // &current_audio_position_in_pcm);
+    // current_audio_position = current_position_in_pcm / frameCount;
   }
 
   // CRITICAL: Post screen update at controlled rate
-
   auto now = std::chrono::steady_clock::now();
 
   if (global_screen && (now - last_update) >= refresh_interval) {
@@ -156,11 +181,22 @@ void data_callback(ma_device* pDevice, void* pOutput, const void* pInput,
   }
 }
 
-int main() {
+int main(int argc, char *argv[]) {
 
-  int bar_spacing = 1;  // Default spacing between bars
-  //bool show_spacing_controls = false;
-  // cavacore
+  if (argc != 2) {
+    std::cout << "Usage: test-starter [path to music folder]";
+    std::cout << "\n" << argc << "\n";
+    exit(0);
+  }
+
+  int bar_spacing = 1; // Default spacing between bars
+  // bool show_spacing_controls = false;
+  ma_result results;
+  ma_decoder decoder;
+  ma_device device;
+  ma_device_config deviceConfig;
+
+  //  cavacore
   plan = cava_init(NUMBER_OF_BARS, SAMPLE_RATE, CHANNELS, AUTOSENS,
                    NOISE_REDUCTION, LOW_CUT_OFF, HIGH_CUT_OFF);
 
@@ -169,24 +205,20 @@ int main() {
     return -1;
   }
 
-  ma_result results;
-  ma_decoder decoder;
-  ma_device device;
-  ma_device_config deviceConfig;
-
-  std::string path = "/home/lonely_shepard/Downloads/Music/";
+  // std::string path = "/home/lonely_shepard/Downloads/Music/";
+  // std::string path = "/home/lonely_shepard/Downloads/";
+  std::string path = std::string(argv[1]);
 
   std::vector<std::string> audio_files_list = get_music_list(path);
   int file_selected = 0;
 
   // FTXUI
   auto screen = ScreenInteractive::Fullscreen();
-  global_screen = &screen;  // Set global screen pointer
-
-
+  global_screen = &screen; // Set global screen pointer
 
   // Create CAVA-style vertical bar visualizer
-  auto create_cava_bar = [](double value, Color bar_color, int max_height = 20) -> Element {
+  auto create_cava_bar = [](double value, Color bar_color,
+                            int max_height = 20) -> Element {
     int filled_height = static_cast<int>(value * max_height);
 
     std::vector<Element> bar_elements;
@@ -213,7 +245,7 @@ int main() {
 
     // Function to add spacing
     auto add_spacing = [&]() {
-      for(int s = 0; s < bar_spacing; ++s) {
+      for (int s = 0; s < bar_spacing; ++s) {
         combined_bars.push_back(text(" "));
       }
     };
@@ -221,8 +253,10 @@ int main() {
     // Combine left and right channels for a fuller spectrum
     // Mirror left channel (reverse order) + right channel
     for (int i = NUMBER_OF_BARS - 1; i >= 0; i--) {
-      double value = (viz_data.bars_left.size() > i) ? viz_data.bars_left[i] : 0.0;
-      Color bar_color = get_gradient_color(value, NUMBER_OF_BARS - 1 - i, NUMBER_OF_BARS * 2);
+      double value =
+          (viz_data.bars_left.size() > i) ? viz_data.bars_left[i] : 0.0;
+      Color bar_color =
+          get_gradient_color(value, NUMBER_OF_BARS - 1 - i, NUMBER_OF_BARS * 2);
       combined_bars.push_back(create_cava_bar(value, bar_color, max_height));
 
       // Add spacing after each bar (except the last one)
@@ -238,8 +272,10 @@ int main() {
 
     // Add right channel bars
     for (int i = 0; i < NUMBER_OF_BARS; i++) {
-      double value = (viz_data.bars_right.size() > i) ? viz_data.bars_right[i] : 0.0;
-      Color bar_color = get_gradient_color(value, i + NUMBER_OF_BARS, NUMBER_OF_BARS * 2);
+      double value =
+          (viz_data.bars_right.size() > i) ? viz_data.bars_right[i] : 0.0;
+      Color bar_color =
+          get_gradient_color(value, i + NUMBER_OF_BARS, NUMBER_OF_BARS * 2);
       combined_bars.push_back(create_cava_bar(value, bar_color, max_height));
 
       // Add spacing after each bar (except the last one)
@@ -248,36 +284,19 @@ int main() {
       }
     }
 
-    Elements main_content = {
-      text("♪ AUDIO SPECTRUM VISUALIZER ♪") | bold | center | color(Color::Cyan),
-                             separator(),
-                             hbox(combined_bars) | center,
-                             separator(),
-                             hbox({
-                               text("Low Freq") | color(Color::Green),
-                                  text(" ← ") | color(Color::White),
-                                  text("Mid Freq") | color(Color::Yellow),
-                                  text(" → ") | color(Color::White),
-                                  text("High Freq") | color(Color::Red)
-                             }) | center
-    };
-
-
-  return vbox({
-    text("♪ littleFlower🌸 Music Player`♪") | bold | center | color(Color::Cyan),
-              separator(),
-              hbox(combined_bars) | center,
-              separator(),
-              hbox({
-                text("Low Freq") | color(Color::Green),
-                   text(" ← ") | color(Color::White),
-                   text("Mid Freq") | color(Color::Yellow),
-                   text(" → ") | color(Color::White),
-                   text("High Freq") | color(Color::Red)
-              }) | center
+    return vbox({text("♪ littleFlower🌸 Music Player`♪") | bold | center |
+                     color(Color::Cyan),
+                 separator(), hbox(combined_bars) | center, separator(),
+                 hbox({text("Low Freq") | color(Color::Green),
+                       text(" ← ") | color(Color::White),
+                       text("Mid Freq") | color(Color::Yellow),
+                       text(" → ") | color(Color::White),
+                       text("High Freq") | color(Color::Red1)}) |
+                     center});
   });
-});
 
+  // int current_audio_position = ma_decoder_get_cursor_in_pcm_frames(&decoder,
+  // &current_audio_position);
 
   auto menu_music_list =
       Menu(&audio_files_list, &file_selected, MenuOption::VerticalAnimated());
@@ -298,6 +317,8 @@ int main() {
       std::string full_music_path = path + audio_files_list[file_selected];
       results = ma_decoder_init_file(full_music_path.c_str(), NULL, &decoder);
 
+      ma_decoder_get_length_in_pcm_frames(&decoder, &audio_length);
+
       if (results != MA_SUCCESS) {
         // printf("", path+);
 
@@ -312,8 +333,12 @@ int main() {
 
       deviceConfig = ma_device_config_init(ma_device_type_playback);
       deviceConfig.playback.format = ma_format_f32;
-      deviceConfig.playback.channels = decoder.outputChannels;
-      deviceConfig.sampleRate = decoder.outputSampleRate;
+      // deviceConfig.playback.channels = decoder.outputChannels;
+      // deviceConfig.sampleRate = decoder.outputSampleRate;
+
+      deviceConfig.playback.channels = CHANNELS;
+      deviceConfig.sampleRate = SAMPLE_RATE;
+
       deviceConfig.dataCallback = data_callback;
       deviceConfig.pUserData = &decoder;
       if (ma_device_init(NULL, &deviceConfig, &device) != MA_SUCCESS) {
@@ -346,11 +371,21 @@ int main() {
            size(HEIGHT, EQUAL, 1);
   });
 
+  auto slider_player = Slider(" Progress: ", &audio_progress, 0, 100, 1);
+
+  // auto slider_player = Renderer([&] {
+  //   int results = std::div((audio_length / decoder.outputSampleRate),
+  //   60).quot; return hbox({text(std::to_string(audio_progress) +
+  //                     "% : " + std::to_string(results))});
+  // });
   auto right_container = Renderer([&] {
     return vbox({
                display_music_state->Render() | bold,
                separator(),
                visualizer->Render(),
+               separator(),
+               filler(),
+               slider_player->Render(),
            }) |
            flex;
   });
