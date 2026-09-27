@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -47,23 +48,273 @@ unsigned char art_px[ART_H * 2][ART_W][3];
 unsigned char art_pal[PAL_N][3];
 int art_loaded = 0;
 int art_pal_n = 0;
+bool cover_theme_picked = false;
 
-int load_cover_art(const char *dir) {
-  static const char *names[] = {
-      "cover.jpg", "cover.jpeg", "cover.png",  "folder.jpg",
-      "folder.png", "AlbumArt.jpg", "front.png", NULL,
-  };
-  char full[1024];
-  for (int ni = 0; names[ni] != NULL; ++ni) {
-    snprintf(full, sizeof(full), "%s/%s", dir, names[ni]);
-    int w = 0, h = 0, ch = 0;
-    unsigned char *px = stbi_load(full, &w, &h, &ch, 3);
-    if (px == NULL || w <= 0 || h <= 0) {
-      if (px != NULL) {
-        stbi_image_free(px);
-      }
-      continue;
+static unsigned int rd_be32(const unsigned char *p) {
+  return ((unsigned int)p[0] << 24) | ((unsigned int)p[1] << 16) |
+         ((unsigned int)p[2] << 8) | (unsigned int)p[3];
+}
+
+static long rd_syncsafe(const unsigned char *p) {
+  return ((long)(p[0] & 0x7F) << 21) | ((long)(p[1] & 0x7F) << 14) |
+         ((long)(p[2] & 0x7F) << 7) | (long)(p[3] & 0x7F);
+}
+
+static unsigned char *copy_bytes(const unsigned char *p, long n,
+                                 int *out_len) {
+  if (n <= 0) {
+    return NULL;
+  }
+  unsigned char *q = (unsigned char *)malloc((size_t)n);
+  if (q == NULL) {
+    return NULL;
+  }
+  memcpy(q, p, (size_t)n);
+  *out_len = (int)n;
+  return q;
+}
+
+static unsigned char *parse_apic(const unsigned char *p, long n,
+                                 int *out_len) {
+  if (n < 6) {
+    return NULL;
+  }
+  int enc = p[0];
+  long i = 1;
+  while (i < n && p[i] != 0) {
+    i++;
+  }
+  if (i >= n) {
+    return NULL;
+  }
+  i++;
+  if (i >= n) {
+    return NULL;
+  }
+  i++;
+  if (enc == 0 || enc == 3) {
+    while (i < n && p[i] != 0) {
+      i++;
     }
+    if (i >= n) {
+      return NULL;
+    }
+    i++;
+  } else {
+    while (i + 1 < n && (p[i] != 0 || p[i + 1] != 0)) {
+      i++;
+    }
+    if (i + 1 >= n) {
+      return NULL;
+    }
+    i += 2;
+  }
+  if (i >= n) {
+    return NULL;
+  }
+  return copy_bytes(p + i, n - i, out_len);
+}
+
+static unsigned char *parse_id3(const unsigned char *b, long len,
+                                int *out_len) {
+  if (len < 10 || memcmp(b, "ID3", 3) != 0) {
+    return NULL;
+  }
+  int ver = b[3];
+  int flags = b[5];
+  if (ver < 3 || ver > 4) {
+    return NULL;
+  }
+  if (flags & 0x80) {
+    return NULL;
+  }
+  long tag_end = 10 + rd_syncsafe(b + 6);
+  if (tag_end > len) {
+    tag_end = len;
+  }
+  long pos = 10;
+  if (flags & 0x40) {
+    if (pos + 4 > tag_end) {
+      return NULL;
+    }
+    if (ver == 4) {
+      pos += 4 + rd_syncsafe(b + pos);
+    } else {
+      pos += (long)rd_be32(b + pos);
+    }
+  }
+  while (pos + 10 <= tag_end) {
+    if (b[pos] == 0) {
+      break;
+    }
+    long fsize =
+        ver == 4 ? rd_syncsafe(b + pos + 4) : (long)rd_be32(b + pos + 4);
+    if (fsize <= 0 || pos + 10 + fsize > tag_end) {
+      break;
+    }
+    if (memcmp(b + pos, "APIC", 4) == 0) {
+      unsigned char *art = parse_apic(b + pos + 10, fsize, out_len);
+      if (art != NULL) {
+        return art;
+      }
+    }
+    pos += 10 + fsize;
+  }
+  return NULL;
+}
+
+static unsigned char *parse_flac(const unsigned char *b, long len,
+                                 int *out_len) {
+  if (len < 8 || memcmp(b, "fLaC", 4) != 0) {
+    return NULL;
+  }
+  long pos = 4;
+  while (pos + 4 <= len) {
+    int type = b[pos] & 0x7F;
+    int last = (b[pos] & 0x80) != 0;
+    long blen =
+        ((long)b[pos + 1] << 16) | ((long)b[pos + 2] << 8) | (long)b[pos + 3];
+    pos += 4;
+    if (blen < 0 || pos + blen > len) {
+      break;
+    }
+    if (type == 6) {
+      long p = pos;
+      if (blen < 32) {
+        break;
+      }
+      p += 4;
+      unsigned int ml = rd_be32(b + p);
+      p += 4;
+      if (p + (long)ml > pos + blen) {
+        break;
+      }
+      p += ml;
+      if (p + 4 > pos + blen) {
+        break;
+      }
+      unsigned int dl = rd_be32(b + p);
+      p += 4;
+      if (p + (long)dl > pos + blen) {
+        break;
+      }
+      p += dl + 16;
+      if (p + 4 > pos + blen) {
+        break;
+      }
+      unsigned int al = rd_be32(b + p);
+      p += 4;
+      if (al == 0 || p + (long)al > pos + blen) {
+        break;
+      }
+      return copy_bytes(b + p, (long)al, out_len);
+    }
+    pos += blen;
+    if (last) {
+      break;
+    }
+  }
+  return NULL;
+}
+
+static int is_mp4_container(const unsigned char *t) {
+  static const char *names[] = {"moov", "udta", "meta", "ilst", "covr",
+                                "trak", "mdia", "minf", "stbl", NULL};
+  for (int i = 0; names[i] != NULL; ++i) {
+    if (memcmp(t, names[i], 4) == 0) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+static unsigned char *parse_mp4_atoms(const unsigned char *b, long start,
+                                      long end, int *out_len) {
+  long pos = start;
+  while (pos + 8 <= end) {
+    unsigned long sz = rd_be32(b + pos);
+    const unsigned char *t = b + pos + 4;
+    long hlen = 8;
+    if (sz == 1) {
+      if (pos + 16 > end) {
+        break;
+      }
+      sz = (((unsigned long)rd_be32(b + pos + 8)) << 32) |
+           (unsigned long)rd_be32(b + pos + 12);
+      hlen = 16;
+    } else if (sz == 0) {
+      sz = (unsigned long)(end - pos);
+    }
+    if (sz < 8 || pos + (long)sz > end) {
+      break;
+    }
+    if (memcmp(t, "meta", 4) == 0) {
+      unsigned char *art =
+          parse_mp4_atoms(b, pos + hlen + 4, pos + (long)sz, out_len);
+      if (art != NULL) {
+        return art;
+      }
+    } else if (is_mp4_container(t)) {
+      unsigned char *art =
+          parse_mp4_atoms(b, pos + hlen, pos + (long)sz, out_len);
+      if (art != NULL) {
+        return art;
+      }
+    } else if (memcmp(t, "data", 4) == 0) {
+      if (sz >= 16) {
+        unsigned int dt = rd_be32(b + pos + hlen);
+        if (dt == 13 || dt == 14) {
+          long dstart = pos + hlen + 8;
+          long dlen = pos + (long)sz - dstart;
+          if (dlen > 0) {
+            return copy_bytes(b + dstart, dlen, out_len);
+          }
+        }
+      }
+    }
+    pos += (long)sz;
+  }
+  return NULL;
+}
+
+static unsigned char *extract_embedded_art(const char *path, int *out_len) {
+  FILE *f = fopen(path, "rb");
+  if (f == NULL) {
+    return NULL;
+  }
+  fseek(f, 0, SEEK_END);
+  long len = ftell(f);
+  if (len <= 0 || len > 134217728L) {
+    fclose(f);
+    return NULL;
+  }
+  rewind(f);
+  unsigned char *b = (unsigned char *)malloc((size_t)len);
+  if (b == NULL) {
+    fclose(f);
+    return NULL;
+  }
+  if (fread(b, 1, (size_t)len, f) != (size_t)len) {
+    free(b);
+    fclose(f);
+    return NULL;
+  }
+  fclose(f);
+  unsigned char *art = NULL;
+  if (len >= 10 && memcmp(b, "ID3", 3) == 0) {
+    art = parse_id3(b, len, out_len);
+  } else if (len >= 4 && memcmp(b, "fLaC", 4) == 0) {
+    art = parse_flac(b, len, out_len);
+  } else if (len >= 8 && (memcmp(b + 4, "ftyp", 4) == 0 ||
+                          memcmp(b + 4, "moov", 4) == 0 ||
+                          memcmp(b + 4, "wide", 4) == 0)) {
+    art = parse_mp4_atoms(b, 0, len, out_len);
+  }
+  free(b);
+  return art;
+}
+
+void ingest_cover_pixels(unsigned char *px, int w, int h) {
     for (int cy = 0; cy < ART_H * 2; ++cy) {
       int y0 = (cy * h) / (ART_H * 2);
       int y1 = ((cy + 1) * h) / (ART_H * 2);
@@ -95,7 +346,6 @@ int load_cover_art(const char *dir) {
         art_px[cy][cx][2] = (unsigned char)(sb / n);
       }
     }
-    stbi_image_free(px);
 
     int hist[4096] = {0};
     int hr[4096] = {0};
@@ -161,9 +411,50 @@ int load_cover_art(const char *dir) {
       }
     }
     art_loaded = 1;
+}
+
+int load_cover_art(const char *dir) {
+  static const char *names[] = {
+      "cover.jpg", "cover.jpeg", "cover.png",  "folder.jpg",
+      "folder.png", "AlbumArt.jpg", "front.png", NULL,
+  };
+  char full[1024];
+  for (int ni = 0; names[ni] != NULL; ++ni) {
+    snprintf(full, sizeof(full), "%s/%s", dir, names[ni]);
+    int w = 0, h = 0, ch = 0;
+    unsigned char *px = stbi_load(full, &w, &h, &ch, 3);
+    if (px == NULL || w <= 0 || h <= 0) {
+      if (px != NULL) {
+        stbi_image_free(px);
+      }
+      continue;
+    }
+    ingest_cover_pixels(px, w, h);
+    stbi_image_free(px);
     return 1;
   }
   return 0;
+}
+
+int load_cover_for_file(const char *filepath, const char *dir) {
+  art_loaded = 0;
+  art_pal_n = 0;
+  int img_len = 0;
+  unsigned char *img = extract_embedded_art(filepath, &img_len);
+  if (img != NULL && img_len > 0) {
+    int w = 0, h = 0, ch = 0;
+    unsigned char *px = stbi_load_from_memory(img, img_len, &w, &h, &ch, 3);
+    free(img);
+    if (px != NULL && w > 0 && h > 0) {
+      ingest_cover_pixels(px, w, h);
+      stbi_image_free(px);
+      return 1;
+    }
+    if (px != NULL) {
+      stbi_image_free(px);
+    }
+  }
+  return load_cover_art(dir);
 }
 
 typedef struct {
@@ -479,6 +770,51 @@ int main(int argc, char *argv[]) {
     return Color::Yellow;
   };
 
+  auto cover_rgb = [](int i, float k) -> Color {
+    if (art_pal_n <= 0) {
+      return Color::White;
+    }
+    if (i < 0) {
+      i = 0;
+    }
+    if (i >= art_pal_n) {
+      i = art_pal_n - 1;
+    }
+    int r = (int)(art_pal[i][0] * k);
+    int g = (int)(art_pal[i][1] * k);
+    int b = (int)(art_pal[i][2] * k);
+    if (r > 255) {
+      r = 255;
+    }
+    if (g > 255) {
+      g = 255;
+    }
+    if (b > 255) {
+      b = 255;
+    }
+    return Color::RGB(r, g, b);
+  };
+
+  auto cover_accent_ui = []() -> Color {
+    if (art_pal_n <= 0) {
+      return Color::Yellow;
+    }
+    int i = art_pal_n - 1;
+    int r = art_pal[i][0];
+    int g = art_pal[i][1];
+    int b = art_pal[i][2];
+    if (r + g + b < 240) {
+      r += (int)((255 - r) * 0.45);
+      g += (int)((255 - g) * 0.45);
+      b += (int)((255 - b) * 0.45);
+    }
+    return Color::RGB(r, g, b);
+  };
+
+  auto cover_on = [&]() -> bool {
+    return color_theme == 3 && art_pal_n > 0;
+  };
+
   // FTXUI
   auto screen = ScreenInteractive::Fullscreen();
   global_screen = &screen; // Set global screen pointer
@@ -535,14 +871,28 @@ int main(int argc, char *argv[]) {
                                : color_theme == 3 ? "cover"
                                                   : "ember";
     Element title = text("♪ " + mode_name + " · " + theme_name + " ♪") | bold |
-                    center | color(Color::Cyan);
-    Element legend =
-        hbox({text("Low Freq") | color(Color::Green),
-              text(" ← ") | color(Color::White),
-              text("Mid Freq") | color(Color::Yellow),
-              text(" → ") | color(Color::White),
-              text("High Freq") | color(Color::Red1)}) |
-        center;
+                    center;
+    title = cover_on() ? title | color(cover_accent_ui())
+                       : title | color(Color::Cyan);
+    Element legend;
+    if (cover_on()) {
+      legend =
+          hbox({text("Low Freq") | color(cover_rgb(0, 1.0f)),
+                text(" ← ") | color(Color::White),
+                text("Mid Freq") | color(cover_rgb(art_pal_n / 2, 1.0f)),
+                text(" → ") | color(Color::White),
+                text("High Freq") |
+                    color(cover_rgb(art_pal_n - 1, 1.0f))}) |
+          center;
+    } else {
+      legend =
+          hbox({text("Low Freq") | color(Color::Green),
+                text(" ← ") | color(Color::White),
+                text("Mid Freq") | color(Color::Yellow),
+                text(" → ") | color(Color::White),
+                text("High Freq") | color(Color::Red1)}) |
+          center;
+    }
 
     if (vis_mode == 1) {
       const int wave_h = 12;
@@ -698,6 +1048,11 @@ int main(int argc, char *argv[]) {
 
     has_audio = true;
     file_selected = idx;
+    load_cover_for_file(full_music_path.c_str(), path.c_str());
+    if (art_loaded && !cover_theme_picked) {
+      color_theme = 3;
+      cover_theme_picked = true;
+    }
     return true;
   };
 
@@ -763,7 +1118,33 @@ int main(int argc, char *argv[]) {
            size(HEIGHT, EQUAL, 1);
   });
 
-  auto slider_player = Slider(" Progress: ", &audio_progress, 0, 100, 1);
+  auto slider_player = Renderer([&] {
+    int pct = audio_progress;
+    if (pct < 0) {
+      pct = 0;
+    }
+    if (pct > 100) {
+      pct = 100;
+    }
+    Element bar = gauge(pct / 100.0f) | flex;
+    if (cover_on()) {
+      bar = bar | color(cover_accent_ui());
+    }
+    return hbox({
+        text(" Progress: "),
+        bar,
+        text(" " + std::to_string(pct) + "% "),
+    });
+  });
+
+  auto hints_footer = Renderer([&] {
+    Element hints = text("Enter/click play · space pause · v visual · c "
+                         "colors · q quit");
+    if (cover_on()) {
+      return hints | color(cover_rgb(0, 1.4f));
+    }
+    return hints | dim;
+  });
 
   // auto slider_player = Renderer([&] {
   //   int results = std::div((audio_length / decoder.outputSampleRate),
@@ -771,16 +1152,20 @@ int main(int argc, char *argv[]) {
   //                     "% : " + std::to_string(results))});
   // });
   auto right_container = Renderer([&] {
+    Element top_sep = separator();
+    Element mid_sep = separator();
+    if (cover_on()) {
+      top_sep = top_sep | color(cover_rgb(0, 1.2f));
+      mid_sep = mid_sep | color(cover_rgb(0, 1.2f));
+    }
     return vbox({
                display_music_state->Render() | bold,
-               separator(),
+               top_sep,
                visualizer->Render(),
-               separator(),
+               mid_sep,
                filler(),
                slider_player->Render(),
-               text("Enter/click play · space pause · v visual · c colors · "
-                    "q quit") |
-                   dim,
+               hints_footer->Render(),
            }) |
            flex;
   });
@@ -828,14 +1213,22 @@ int main(int argc, char *argv[]) {
   // });
 
   auto renderer = Renderer(container, [&] {
-    return window(text("TUI_MUSIC_PLAYER") | bold,
-                  hbox({
-                      left_panel->Render() |
-                          size(WIDTH, GREATER_THAN, 25) | color(Color::Red),
-                      separatorStyled(DASHED),
-                      right_container->Render(),
-
-                  }));
+    Element app_title = text("TUI_MUSIC_PLAYER") | bold;
+    Element left = left_panel->Render() | size(WIDTH, GREATER_THAN, 25);
+    Element mid_sep = separatorStyled(DASHED);
+    if (cover_on()) {
+      app_title = app_title | color(cover_accent_ui());
+      left = left | color(cover_rgb(art_pal_n / 2, 1.6f));
+      mid_sep = mid_sep | color(cover_rgb(0, 1.2f));
+    } else {
+      left = left | color(Color::Red);
+    }
+    Element win =
+        window(app_title, hbox({left, mid_sep, right_container->Render()}));
+    if (cover_on()) {
+      win = win | bgcolor(cover_rgb(0, 0.22f));
+    }
+    return win;
   });
 
   renderer = CatchEvent(renderer, [&](Event event) {
@@ -860,6 +1253,7 @@ int main(int argc, char *argv[]) {
       return true;
     } else if (event == Event::Character('c')) {
       color_theme = (color_theme + 1) % 4;
+      cover_theme_picked = true;
 
       return true;
     } else if (event == Event::Custom) {
