@@ -9,6 +9,19 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
+if(NOT CMAKE_BUILD_TYPE)
+  set(CMAKE_BUILD_TYPE MinSizeRel CACHE STRING "Build type" FORCE)
+endif()
+
+include(CheckIPOSupported)
+check_ipo_supported(RESULT ipo_ok OUTPUT ipo_msg)
+if(ipo_ok)
+  set(CMAKE_INTERPROCEDURAL_OPTIMIZATION TRUE)
+endif()
+
+add_compile_options(-ffunction-sections -fdata-sections)
+add_link_options(-Wl,--gc-sections $<$<NOT:$<CONFIG:Debug>>:-s>)
 include(FetchContent)
 
 set(FETCHCONTENT_UPDATES_DISCONNECTED ON)
