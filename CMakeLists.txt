@@ -34,9 +34,13 @@ FetchContent_Declare(ftxui
   GIT_SHALLOW    TRUE
   EXCLUDE_FROM_ALL
 )
-#set(FXUI_ENABLE_DEV_WARNINGS ON)
-#use "cmake -DFXUI_ENABLE_DEV_WARNINGS=ON .. "
-FetchContent_MakeAvailable(ftxui)
+FetchContent_Declare(stb
+  URL https://raw.githubusercontent.com/nothings/stb/master/stb_image.h
+  DOWNLOAD_NO_EXTRACT TRUE
+)
+# set(FXUI_ENABLE_DEV_WARNINGS ON)
+# use "cmake -DFXUI_ENABLE_DEV_WARNINGS=ON .. "
+FetchContent_MakeAvailable(ftxui stb)
 # ------------------------------------------------------------------------------
 add_library(cavacore STATIC IMPORTED)
 set_target_properties(cavacore PROPERTIES IMPORTED_LOCATION "${CMAKE_CURRENT_SOURCE_DIR}/include/libcavacore.a")
@@ -45,6 +49,7 @@ set_target_properties(cavacore PROPERTIES
 )
 
 add_executable(test-starter src/main.cpp)
+target_include_directories(test-starter PRIVATE ${stb_SOURCE_DIR})
 # target_link_libraries(test-starter libcavacore)
 # target_include_directories(test-starter PRIVATE include/)
 # include_directories(include)
