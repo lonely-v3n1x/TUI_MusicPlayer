@@ -1,4 +1,6 @@
 // standard libs
+#include <algorithm>
+#include <cmath>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -153,10 +155,24 @@ void data_callback(ma_device *pDevice, void *pOutput, const void *pInput,
     double cava_out[NUMBER_OF_BARS * CHANNELS] = {0};
 
     for (int i = 0; i < frameCount * 2; ++i) {
-      pcm_double[i] = (double)pcm_float32[i];
+      double s = (double)pcm_float32[i];
+      if (!isfinite(s)) {
+        s = 0.0;
+      } else if (s > 1.0) {
+        s = 1.0;
+      } else if (s < -1.0) {
+        s = -1.0;
+      }
+      pcm_double[i] = s;
     }
 
     cava_execute(pcm_double, frameCount * CHANNELS, cava_out, plan);
+
+    for (int i = 0; i < NUMBER_OF_BARS * CHANNELS; ++i) {
+      if (!isfinite(cava_out[i])) {
+        cava_out[i] = 0.0;
+      }
+    }
 
     std::lock_guard<std::mutex> lock(viz_data.mutex);
     viz_data.bars_left.assign(cava_out, cava_out + NUMBER_OF_BARS);
@@ -195,6 +211,7 @@ int main(int argc, char *argv[]) {
   ma_decoder decoder;
   ma_device device;
   ma_device_config deviceConfig;
+  bool has_audio = false;
 
   //  cavacore
   plan = cava_init(NUMBER_OF_BARS, SAMPLE_RATE, CHANNELS, AUTOSENS,
@@ -215,6 +232,7 @@ int main(int argc, char *argv[]) {
   // FTXUI
   auto screen = ScreenInteractive::Fullscreen();
   global_screen = &screen; // Set global screen pointer
+  screen.TrackMouse();
 
   // Create CAVA-style vertical bar visualizer
   auto create_cava_bar = [](double value, Color bar_color,
@@ -298,66 +316,80 @@ int main(int argc, char *argv[]) {
   // int current_audio_position = ma_decoder_get_cursor_in_pcm_frames(&decoder,
   // &current_audio_position);
 
+  auto play_index = [&](int idx) -> bool {
+    int count = (int)audio_files_list.size();
+    if (count == 0 || idx < 0 || idx >= count) {
+      return false;
+    }
+
+    if (has_audio) {
+      ma_device_stop(&device);
+      ma_device_uninit(&device);
+      ma_decoder_uninit(&decoder);
+      has_audio = false;
+      if (!playing) {
+        playing = !playing;
+      }
+    }
+
+    std::string full_music_path =
+        (fs::path(path) / audio_files_list[idx]).string();
+    results = ma_decoder_init_file(full_music_path.c_str(), NULL, &decoder);
+    if (results != MA_SUCCESS) {
+      return false;
+    }
+
+    ma_decoder_get_length_in_pcm_frames(&decoder, &audio_length);
+
+    deviceConfig = ma_device_config_init(ma_device_type_playback);
+    deviceConfig.playback.format = ma_format_f32;
+
+    deviceConfig.playback.channels = CHANNELS;
+    deviceConfig.sampleRate = SAMPLE_RATE;
+
+    deviceConfig.dataCallback = data_callback;
+    deviceConfig.pUserData = &decoder;
+    if (ma_device_init(NULL, &deviceConfig, &device) != MA_SUCCESS) {
+      ma_decoder_uninit(&decoder);
+      return false;
+    }
+
+    if (ma_device_start(&device) != MA_SUCCESS) {
+      ma_device_uninit(&device);
+      ma_decoder_uninit(&decoder);
+      return false;
+    }
+
+    has_audio = true;
+    file_selected = idx;
+    return true;
+  };
+
   auto menu_music_list =
       Menu(&audio_files_list, &file_selected, MenuOption::VerticalAnimated());
   menu_music_list = CatchEvent(menu_music_list, [&](Event event) {
     if (event == Event::Return) {
-      // check if playing is false, change to true
-
-      if (ma_device_is_started(&device)) {
-        ma_device_stop(&device);
-        ma_device_uninit(&device);
-        ma_decoder_uninit(&decoder);
-        if (!playing) {
-          playing = !playing;
+      play_index(file_selected);
+      return true;
+    }
+    if (event.is_mouse() && event.mouse().motion == Mouse::Released &&
+        (event.mouse().button == Mouse::Left ||
+         event.mouse().button == Mouse::None)) {
+      int longest = 0;
+      for (auto &f : audio_files_list) {
+        if ((int)f.size() > longest) {
+          longest = (int)f.size();
         }
       }
-
-      // load the file, check playing state and play the song
-      std::string full_music_path = path + audio_files_list[file_selected];
-      results = ma_decoder_init_file(full_music_path.c_str(), NULL, &decoder);
-
-      ma_decoder_get_length_in_pcm_frames(&decoder, &audio_length);
-
-      if (results != MA_SUCCESS) {
-        // printf("", path+);
-
-        screen.ExitLoopClosure()();
-        std::cout << "Failed to load music file"
-                  << path + audio_files_list[file_selected] << std::endl;
-
-        // return -2;
+      int menu_w = std::max(25, longest);
+      int count = (int)audio_files_list.size();
+      int ix = event.mouse().x;
+      int iy = event.mouse().y;
+      if (ix >= 1 && ix <= menu_w && iy >= 1 && iy < 1 + count) {
+        play_index(iy - 1);
+        return true;
       }
-
-      // device_started=MA_TRUE;
-
-      deviceConfig = ma_device_config_init(ma_device_type_playback);
-      deviceConfig.playback.format = ma_format_f32;
-      // deviceConfig.playback.channels = decoder.outputChannels;
-      // deviceConfig.sampleRate = decoder.outputSampleRate;
-
-      deviceConfig.playback.channels = CHANNELS;
-      deviceConfig.sampleRate = SAMPLE_RATE;
-
-      deviceConfig.dataCallback = data_callback;
-      deviceConfig.pUserData = &decoder;
-      if (ma_device_init(NULL, &deviceConfig, &device) != MA_SUCCESS) {
-        screen.ExitLoopClosure()();
-        std::cout << "Failed ot open playback device" << std::endl;
-        ma_decoder_uninit(&decoder);
-        // return -3;
-      }
-
-      if (ma_device_start(&device) != MA_SUCCESS) {
-        ma_device_uninit(&device);
-        ma_decoder_uninit(&decoder);
-        screen.ExitLoopClosure()();
-
-        std::cout << "Failed to start playback device" << std::endl;
-        // return -4;
-      }
-
-      return true;
+      return false;
     }
     return false;
   });
